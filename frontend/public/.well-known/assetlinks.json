@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.abstechnologies.associatesindia",
+      "sha256_cert_fingerprints": [
+        "9A:C4:52:62:94:C3:16:DB:46:88:B5:EE:7A:0B:26:75:A9:9D:00:9A:49:0F:28:7F:6D:35:31:6B:39:89:E6:61"
+      ]
+    }
+  }
+]

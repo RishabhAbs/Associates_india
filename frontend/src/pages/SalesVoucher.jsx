@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Search, RefreshCw, FileSearch, ShoppingCart, Download } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
@@ -16,6 +16,12 @@ const fmtAmt = (v) => {
   return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+const fmt = (n) => {
+  if (n >= 10000000) return '₹' + (n / 10000000).toFixed(2) + ' Cr'
+  if (n >= 100000)   return '₹' + (n / 100000).toFixed(2) + ' L'
+  return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 0 })
+}
+
 const SortBtn = ({ field, sort, onSort }) => {
   const active = sort.field === field
   return (
@@ -28,39 +34,43 @@ const SortBtn = ({ field, sort, onSort }) => {
 
 export default function SalesVoucher() {
   const { API } = useAuth()
-  const [rows, setRows]           = useState([])
+  const [rows, setRows]             = useState([])
+  const [total, setTotal]           = useState(0)
   const [lastSynced, setLastSynced] = useState(null)
-  const [loading, setLoading]     = useState(false)
-  const [syncing, setSyncing]     = useState(false)
-  const [error, setError]         = useState(null)
-  const [search, setSearch]       = useState('')
-  const [page, setPage]           = useState(1)
-  const [sort, setSort]           = useState({ field: 'billdate', dir: 'desc' })
+  const [loading, setLoading]       = useState(false)
+  const [syncing, setSyncing]       = useState(false)
+  const [error, setError]           = useState(null)
+  const [search, setSearch]         = useState('')
+  const [page, setPage]             = useState(1)
+  const [sort, setSort]             = useState({ field: 'billdate', dir: 'desc' })
 
-  // Load from store (fast)
-  const fetchData = () => {
+  const searchTimer = useRef(null)
+
+  const fetchData = useCallback((pg = 1, q = search, s = sort) => {
     setLoading(true)
     setError(null)
-    API.get('/sales/vouchers')
+    const params = new URLSearchParams({
+      page: pg, limit: PAGE_SIZE,
+      sort: s.field, dir: s.dir,
+      ...(q ? { search: q } : {}),
+    })
+    API.get(`/sales/vouchers?${params}`)
       .then(r => {
         setRows(r.data?.entries || [])
+        setTotal(r.data?.total  || 0)
         setLastSynced(r.data?.lastSynced || null)
-        setPage(1)
       })
       .catch(e => setError(e?.response?.data?.message || 'Failed to load sales data'))
       .finally(() => setLoading(false))
-  }
+  }, [API, search, sort])
 
-  // Sync: backend fetches from Tally (Connection:close, batches of 100) and saves to DB
+  // Sync from Tally via backend
   const syncFromTally = async () => {
     setSyncing(true)
     setError(null)
     try {
-      // Backend does the Tally fetch + batch insert — may take up to 3 minutes
-      const saved = await API.post('/sales/sync', {}, { timeout: 300000 })
-      setRows(saved.data?.entries || [])
-      setLastSynced(saved.data?.lastSynced || new Date().toISOString())
-      setPage(1)
+      await API.post('/sales/sync', {}, { timeout: 300000 })
+      fetchData(1, search, sort)
     } catch (e) {
       console.error('Sync error:', e)
       setError(e?.response?.data?.message || e?.message || 'Failed to sync from Tally')
@@ -69,44 +79,30 @@ export default function SalesVoucher() {
     }
   }
 
-  useEffect(() => { fetchData() }, [])
+  useEffect(() => { fetchData(1, '', sort) }, [])
+
+  const handleSearch = (val) => {
+    setSearch(val)
+    clearTimeout(searchTimer.current)
+    searchTimer.current = setTimeout(() => {
+      setPage(1)
+      fetchData(1, val, sort)
+    }, 400)
+  }
 
   const handleSort = (field) => {
-    setSort(s => ({ field, dir: s.field === field && s.dir === 'asc' ? 'desc' : 'asc' }))
+    const newSort = { field, dir: sort.field === field && sort.dir === 'asc' ? 'desc' : 'asc' }
+    setSort(newSort)
     setPage(1)
+    fetchData(1, search, newSort)
   }
 
-  const filtered = useMemo(() => {
-    const q = search.toLowerCase()
-    return rows
-      .filter(r =>
-        !q ||
-        r.party?.toLowerCase().includes(q) ||
-        r.billno?.toLowerCase().includes(q) ||
-        r.stockitemname?.toLowerCase().includes(q)
-      )
-      .sort((a, b) => {
-        let av = a[sort.field] || '', bv = b[sort.field] || ''
-        if (['amount', 'totalamt', 'discount'].includes(sort.field)) {
-          av = parseFloat(av) || 0; bv = parseFloat(bv) || 0
-          return sort.dir === 'asc' ? av - bv : bv - av
-        }
-        return sort.dir === 'asc'
-          ? String(av).localeCompare(String(bv))
-          : String(bv).localeCompare(String(av))
-      })
-  }, [rows, search, sort])
-
-  const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
-  const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-
-  const totalAmt = filtered.reduce((s, r) => s + Math.abs(Number(r.totalamt || 0)), 0)
-
-  const fmt = (n) => {
-    if (n >= 10000000) return '₹' + (n / 10000000).toFixed(2) + ' Cr'
-    if (n >= 100000)   return '₹' + (n / 100000).toFixed(2) + ' L'
-    return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 0 })
+  const handlePage = (pg) => {
+    setPage(pg)
+    fetchData(pg, search, sort)
   }
+
+  const totalPages = Math.ceil(total / PAGE_SIZE)
 
   const TH = ({ label, field, right }) => (
     <th className={`px-4 py-3 text-xs font-semibold text-gray-600 whitespace-nowrap ${right ? 'text-right' : 'text-left'}`}>
@@ -125,7 +121,7 @@ export default function SalesVoucher() {
             type="text"
             placeholder="Search party, bill no, item..."
             value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1) }}
+            onChange={e => handleSearch(e.target.value)}
             className="flex-1 text-sm outline-none text-gray-700 placeholder-gray-400"
           />
           {lastSynced && (
@@ -134,10 +130,10 @@ export default function SalesVoucher() {
             </span>
           )}
           <button
-            onClick={fetchData}
+            onClick={() => { setPage(1); fetchData(1, search, sort) }}
             disabled={loading}
             className="w-8 h-8 flex items-center justify-center border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-            title="Reload from store"
+            title="Reload"
           >
             <RefreshCw size={14} className={`text-gray-500 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -153,12 +149,11 @@ export default function SalesVoucher() {
         </div>
 
         {/* Summary strip */}
-        {!loading && rows.length > 0 && (
-          <div className="grid grid-cols-3 gap-2 mb-2">
+        {total > 0 && (
+          <div className="grid grid-cols-2 gap-2 mb-2">
             {[
-              { label: 'Total Entries', value: filtered.length,              color: 'text-gray-800' },
-              { label: 'Total Amount',  value: fmt(totalAmt),                color: 'text-abs-red'  },
-              { label: 'Unique Bills',  value: new Set(filtered.map(r => r.billno)).size, color: 'text-blue-600' },
+              { label: 'Total Entries', value: total.toLocaleString('en-IN'), color: 'text-gray-800' },
+              { label: 'Showing Page',  value: `${page} of ${totalPages}`,    color: 'text-blue-600' },
             ].map(({ label, value, color }) => (
               <div key={label} className="bg-white rounded-xl border border-gray-100 shadow-sm px-3 py-2.5">
                 <p className="text-[10px] text-gray-400 font-medium leading-tight">{label}</p>
@@ -173,18 +168,18 @@ export default function SalesVoucher() {
       {loading ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-12 h-12 rounded-full border-4 border-pink-200 border-t-abs-red animate-spin" />
-          <p className="text-sm text-gray-500">Fetching from Tally...</p>
+          <p className="text-sm text-gray-500">Loading sales data...</p>
         </div>
       ) : error && rows.length === 0 ? (
         <div className="bg-white rounded-xl border border-red-100 shadow-sm flex flex-col items-center justify-center py-16 gap-3">
           <ShoppingCart size={32} className="text-red-200" />
           <p className="text-sm font-bold text-gray-600">Could Not Load Sales Data</p>
           <p className="text-xs text-gray-400">{error}</p>
-          <button onClick={fetchData} className="mt-1 text-xs text-abs-red hover:underline">Retry</button>
+          <button onClick={() => fetchData(1, search, sort)} className="mt-1 text-xs text-abs-red hover:underline">Retry</button>
         </div>
       ) : (
         <>
-          {paginated.length === 0 ? (
+          {rows.length === 0 ? (
             <div className="bg-white rounded-xl border border-gray-100 shadow-sm flex flex-col items-center justify-center py-16 gap-3">
               <FileSearch size={32} className="text-gray-200" />
               <p className="text-sm font-bold text-gray-600">No Records Found</p>
@@ -198,18 +193,18 @@ export default function SalesVoucher() {
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-100">
                       <th className="px-4 py-3 text-xs font-semibold text-gray-600 text-left w-10">#</th>
-                      <TH label="Bill No"    field="billno" />
-                      <TH label="Date"       field="billdate" />
-                      <TH label="Party"      field="party" />
-                      <TH label="Item"       field="stockitemname" />
-                      <TH label="Rate"       field="rate" />
-                      <TH label="Qty"        field="billedqty" right />
-                      <TH label="Disc %"     field="discount" right />
-                      <TH label="Amount"     field="amount" right />
+                      <TH label="Bill No"  field="billno" />
+                      <TH label="Date"     field="billdate" />
+                      <TH label="Party"    field="party" />
+                      <TH label="Item"     field="stockitemname" />
+                      <TH label="Rate"     field="rate" />
+                      <TH label="Qty"      field="billedqty" right />
+                      <TH label="Disc %"   field="discount" right />
+                      <TH label="Amount"   field="totalamt" right />
                     </tr>
                   </thead>
                   <tbody>
-                    {paginated.map((r, i) => (
+                    {rows.map((r, i) => (
                       <tr key={r.id ?? `${r.billno}-${r.stockitemname}-${i}`} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                         <td className="px-4 py-3 text-gray-400 text-xs">{(page - 1) * PAGE_SIZE + i + 1}</td>
                         <td className="px-4 py-3 text-xs font-medium text-blue-600 whitespace-nowrap">{r.billno || '—'}</td>
@@ -228,7 +223,7 @@ export default function SalesVoucher() {
 
               {/* Mobile cards */}
               <div className="sm:hidden bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
-                {paginated.map((r, i) => (
+                {rows.map((r, i) => (
                   <div key={r.id ?? `${r.billno}-${r.stockitemname}-${i}`} className="border-b border-gray-100 px-4 py-3">
                     <div className="flex items-start justify-between gap-2 mb-1">
                       <p className="text-sm font-bold text-gray-900 flex-1 leading-tight">{r.party || '—'}</p>
@@ -252,23 +247,23 @@ export default function SalesVoucher() {
           )}
 
           {/* Pagination */}
-          {filtered.length > PAGE_SIZE && (
+          {totalPages > 1 && (
             <div className="bg-white rounded-xl border border-gray-100 shadow-sm mt-2 px-4 py-2.5 flex items-center justify-between">
               <p className="text-xs text-gray-400">
-                Showing <span className="font-medium text-gray-600">{(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)}</span> of <span className="font-medium text-gray-600">{filtered.length}</span>
+                Showing <span className="font-medium text-gray-600">{(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)}</span> of <span className="font-medium text-gray-600">{total.toLocaleString('en-IN')}</span>
               </p>
               <div className="flex items-center gap-1">
-                <button onClick={() => setPage(1)} disabled={page === 1} className="px-2 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">«</button>
-                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">‹</button>
+                <button onClick={() => handlePage(1)} disabled={page === 1} className="px-2 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">«</button>
+                <button onClick={() => handlePage(page - 1)} disabled={page === 1} className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">‹</button>
                 {Array.from({ length: totalPages }, (_, i) => i + 1)
                   .filter(p => p === 1 || p === totalPages || Math.abs(p - page) <= 1)
                   .reduce((acc, p, idx, arr) => { if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…'); acc.push(p); return acc }, [])
                   .map((p, idx) => p === '…'
                     ? <span key={`ellipsis-${idx}`} className="px-1 text-xs text-gray-400">…</span>
-                    : <button key={`page-${p}`} onClick={() => setPage(p)} className={`w-7 h-7 text-xs rounded-lg border transition-colors ${page === p ? 'bg-abs-red text-white border-abs-red font-semibold' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>{p}</button>
+                    : <button key={`page-${p}`} onClick={() => handlePage(p)} className={`w-7 h-7 text-xs rounded-lg border transition-colors ${page === p ? 'bg-abs-red text-white border-abs-red font-semibold' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>{p}</button>
                   )}
-                <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">›</button>
-                <button onClick={() => setPage(totalPages)} disabled={page === totalPages} className="px-2 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">»</button>
+                <button onClick={() => handlePage(page + 1)} disabled={page === totalPages} className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">›</button>
+                <button onClick={() => handlePage(totalPages)} disabled={page === totalPages} className="px-2 py-1 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40">»</button>
               </div>
             </div>
           )}

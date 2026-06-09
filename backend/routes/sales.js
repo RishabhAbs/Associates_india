@@ -5,16 +5,41 @@ const pool = require('../utils/db');
 
 const router = express.Router();
 
-// GET /api/sales/vouchers — serve from MySQL
+// GET /api/sales/vouchers — server-side paginated + searchable
 router.get('/vouchers', authMiddleware, async (req, res) => {
   try {
+    const page     = Math.max(1, parseInt(req.query.page  || '1'));
+    const limit    = Math.min(200, Math.max(1, parseInt(req.query.limit || '50')));
+    const search   = (req.query.search || '').trim();
+    const sortField = ['billno','billdate','party','stockitemname','rate','billedqty','discount','totalamt'].includes(req.query.sort)
+      ? req.query.sort : 'billdate';
+    const sortDir  = req.query.dir === 'asc' ? 'ASC' : 'DESC';
+    const offset   = (page - 1) * limit;
+
+    let where = '';
+    const params = [];
+    if (search) {
+      where = 'WHERE party LIKE ? OR billno LIKE ? OR stockitemname LIKE ?';
+      const q = `%${search}%`;
+      params.push(q, q, q);
+    }
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM sales ${where}`, params
+    );
     const [rows] = await pool.query(
-      'SELECT * FROM sales ORDER BY billdate DESC, id DESC'
+      `SELECT * FROM sales ${where} ORDER BY ${sortField} ${sortDir}, id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
     );
-    const [[meta]] = await pool.query(
-      'SELECT MAX(synced_at) AS lastSynced FROM sales'
-    );
-    res.json({ lastSynced: meta?.lastSynced || null, entries: rows });
+    const [[meta]] = await pool.query('SELECT MAX(synced_at) AS lastSynced FROM sales');
+
+    res.json({
+      lastSynced: meta?.lastSynced || null,
+      entries: rows,
+      total: parseInt(total),
+      page,
+      limit,
+    });
   } catch (err) {
     console.error('sales/vouchers DB error:', err.message);
     res.status(500).json({ message: 'Database error', error: err.message });
